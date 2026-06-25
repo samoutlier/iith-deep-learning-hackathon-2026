@@ -1,17 +1,4 @@
-"""# IIT-H Deep Learning Hackathon — Spring 2026
-### Binary Image Classification — Version 3
-
-## Changes from Version 2
-| # | Change | Why |
-|---|---|---|
-| 1 | **Normalize added** to both train & val transforms | Pixels centred around 0 — faster, more stable convergence |
-| 2 | **RandomGrayscale p=0.5 → p=0.15** | 0.5 was stripping useful colour info too aggressively |
-| 3 | **SEBlock** added inside every residual block | Learns which channels matter; suppresses spurious channels |
-| 4 | **CosineAnnealingLR** scheduler added | LR decays smoothly — fixes the acc plateau seen after epoch 30 |
-| 5 | **5 milestone checkpoints** (best_acc, best_loss, ep30, ep40, ep50) | Genuinely diverse snapshots; was best_acc/best_loss/last (last two were often identical) |
-| 6 | **TTA expanded from 2 → 8** variants | More views per image → more stable final probability |
-| 7 | **Batched TTA inference** via DataLoader | ~8x faster than the original per-image loop |
-
+""" 
 ## Cell 1 — Imports
 """
 
@@ -45,8 +32,6 @@ class CFG:
     device     = "cuda" if torch.cuda.is_available() else "cpu"
     seed       = 2025
 
-    # Milestone epochs at which we save an extra checkpoint
-    # These are spread out so the 3 milestone checkpoints are genuinely different
     milestone_epochs = [30, 40, 50]
 
 print("Device:", CFG.device)
@@ -85,14 +70,8 @@ print("ImageDataset class ready.")
 
 """## Cell 5 — Transforms"""
 
-# CHANGE 1: Added Normalize to both train and val transforms.
-#   Without this, pixel values sit in [0,1] — neural nets converge much better
-#   when values are centred around zero.  Both transforms MUST use the same
-#   mean/std so the model sees a consistent distribution at train and test time.
-#
-# CHANGE 2: RandomGrayscale p=0.5 → p=0.15
-#   At 50% the model rarely sees colour, which could destroy useful colour cues.
-#   0.15 still teaches robustness to greyscale without overdoing it.
+# CHANGE 1: Added Normalize to both train and val transforms. 
+# CHANGE 2: RandomGrayscale p=0.5 → p=0.15 
 
 MEAN = [0.5, 0.5, 0.5]
 STD  = [0.5, 0.5, 0.5]
@@ -101,7 +80,7 @@ train_tfms = transforms.Compose([
     transforms.RandomResizedCrop(CFG.img_size, scale=(0.6, 1.0)),
     transforms.RandomHorizontalFlip(),
     transforms.RandomVerticalFlip(p=0.3),
-    transforms.RandomGrayscale(p=0.15),          # was 0.5 — reduced
+    transforms.RandomGrayscale(p=0.15),          # was 0.5 
     transforms.ColorJitter(0.5, 0.5, 0.5, 0.2),
     transforms.GaussianBlur(3, sigma=(0.1, 2.0)),
     transforms.ToTensor(),
@@ -111,7 +90,7 @@ train_tfms = transforms.Compose([
 val_tfms = transforms.Compose([
     transforms.Resize((CFG.img_size, CFG.img_size)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=MEAN, std=STD),    # NEW — must match train
+    transforms.Normalize(mean=MEAN, std=STD),    # NEW  
 ])
 
 print("Train transform: RandomResizedCrop + flips + ColorJitter + Blur + Normalize")
@@ -172,7 +151,7 @@ class SEBlock(nn.Module):
             nn.Sigmoid()                    # outputs per-channel weights in [0, 1]
         )
 
-    def forward(self, x): 
+    def forward(self, x):
         return x * self.se(x).view(x.size(0), x.size(1), 1, 1)
 
 
@@ -187,8 +166,7 @@ class Block(nn.Module):
             nn.Conv2d(out_c, out_c, 3, 1, 1, bias=False),
             nn.BatchNorm2d(out_c),
         )
-        self.se   = SEBlock(out_c)        
-        
+        self.se   = SEBlock(out_c)          # NEW: channel attention after conv
         self.skip = (nn.Conv2d(in_c, out_c, 1, stride, bias=False)
                      if in_c != out_c or stride != 1 else nn.Identity())
 
@@ -222,7 +200,6 @@ class Net(nn.Module):
         x = self.pool(x).view(x.size(0), -1)
         return self.fc(x)
 
- 
 _m = Net()
 _p = sum(p.numel() for p in _m.parameters())
 _y = _m(torch.zeros(2, 3, 96, 96))
@@ -247,6 +224,7 @@ model     = Net().to(CFG.device)
 criterion = SmoothBCE(smoothing=0.05)
 optimizer = optim.Adam(model.parameters(), lr=CFG.lr)
 
+# CHANGE: CosineAnnealingLR — LR starts at 3e-4 and smoothly decays to 0
 scheduler = CosineAnnealingLR(optimizer, T_max=CFG.epochs, eta_min=1e-6)
 
 print("Model      :", model.__class__.__name__)
@@ -261,14 +239,17 @@ print("Loss       : SmoothBCE(smoothing=0.05)")
 #   best_loss.pt       — best validation loss seen at any epoch
 #   ckpt_ep30.pt       — snapshot at epoch 30
 #   ckpt_ep40.pt       — snapshot at epoch 40
-#   ckpt_ep50.pt       — snapshot at epoch 50  (= last) 
+#   ckpt_ep50.pt       — snapshot at epoch 50  (= last)
+#
+# These 5 checkpoints are all genuinely different snapshots spread across
+# the training curve, so ensembling them gives diverse, uncorrelated votes.
 
 best_acc_val  = 0.0
 best_loss_val = float("inf")
 
 for epoch in range(1, CFG.epochs + 1):
 
-    #  Train 
+    # ── Train ────────────────────────────────────────────────────────────────
     model.train()
     train_loss = 0.0
 
@@ -281,7 +262,7 @@ for epoch in range(1, CFG.epochs + 1):
         optimizer.step()
         train_loss += loss.item()
 
-    #  Validate  
+    # ── Validate ─────────────────────────────────────────────────────────────
     model.eval()
     val_loss  = 0.0
     correct   = 0
@@ -305,21 +286,21 @@ for epoch in range(1, CFG.epochs + 1):
     avg_vloss  = val_loss / len(val_loader)
     cur_lr     = optimizer.param_groups[0]["lr"]
 
-    #  Scheduler step 
-    scheduler.step()  
+    # ── Scheduler step ───────────────────────────────────────────────────────
+    scheduler.step()   # CHANGE: step cosine LR every epoch
 
-    #   Save best_acc 
+    # ── Save best_acc ────────────────────────────────────────────────────────
     if acc > best_acc_val:
         best_acc_val = acc
         torch.save(model.state_dict(), "best_acc.pt")
 
-    # Save best_loss  
+    # ── Save best_loss ───────────────────────────────────────────────────────
     if avg_vloss < best_loss_val:
         best_loss_val = avg_vloss
         torch.save(model.state_dict(), "best_loss.pt")
 
-    #   Save milestone checkpoints  
-    #  save at epochs 30, 40, 50 so we have genuinely diverse snapshots
+    # ── Save milestone checkpoints ───────────────────────────────────────────
+    # CHANGE: save at epochs 30, 40, 50 so we have genuinely diverse snapshots
     if epoch in CFG.milestone_epochs:
         ckpt_name = f"ckpt_ep{epoch}.pt"
         torch.save(model.state_dict(), ckpt_name)
@@ -365,13 +346,14 @@ for ckpt in ["best_acc.pt", "best_loss.pt",
     evaluate_checkpoint(model, ckpt, val_loader)
 
 """## Cell 12 — TTA Inference (8 variants per checkpoint)"""
- 
+
+# CHANGE: TTA expanded from 2 (original + hflip) to 8 deterministic variants.
 
 test_dir  = os.path.join(CFG.data_dir, "test", "test")
 test_imgs = sorted(os.listdir(test_dir))
 
 s  = CFG.img_size
-sp = int(s * 1.12)   
+sp = int(s * 1.12)   # slightly larger for center-crop TTA
 
 norm = transforms.Normalize(mean=MEAN, std=STD)
 
@@ -478,6 +460,7 @@ save_preds(p_ep30,      "sub_ep30.csv")
 save_preds(p_ep40,      "sub_ep40.csv")
 save_preds(p_ep50,      "sub_ep50.csv")
 
+
 available = [p for p in [p_best_acc, p_best_loss, p_ep30, p_ep40, p_ep50]
              if p is not None]
 ensemble  = np.mean(available, axis=0)
@@ -498,6 +481,9 @@ df.head(10)
 
 """## Cell 16 — `generate_predictions(data_dir)` for .py Submission"""
 
+# This function is fully self-contained.
+# Save it as solution.py and submit to MS Teams.
+# Run: python solution.py  then type the data_dir path when prompted.
 
 def generate_predictions(data_dir):
     import os, random
@@ -509,6 +495,7 @@ def generate_predictions(data_dir):
     from torchvision import transforms
     from PIL import Image
 
+    #  Config 
     DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     IMG_SIZE   = 96
     BATCH_SIZE = 128
@@ -580,8 +567,10 @@ def generate_predictions(data_dir):
         def __getitem__(self, i):
             return self.t(Image.open(os.path.join(self.d, self.fs[i])).convert("RGB"))
 
+    # ── Ensemble TTA inference ────────────────────────────────────────────────
     ckpt_names = ["best_acc.pt", "best_loss.pt",
                   "ckpt_ep30.pt", "ckpt_ep40.pt", "ckpt_ep50.pt"]
+    # ckpt_names = [  "best_acc.pt"]
 
     sum_probs = np.zeros(len(test_imgs), dtype=np.float64)
     n_votes   = 0
